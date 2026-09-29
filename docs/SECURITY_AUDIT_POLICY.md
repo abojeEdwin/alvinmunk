@@ -28,13 +28,17 @@ Configuration: `contracts/deny.toml`
 ## JavaScript/TypeScript Dependencies
 
 ### pnpm audit
-Scans production npm dependencies for known vulnerabilities.
+Scans production npm dependencies for known vulnerabilities, via `node scripts/pnpm-audit-gate.mjs --prod --level critical` rather than the bare `pnpm audit` command.
 
-**Current threshold:** `--audit-level=critical`  
-- Fails CI on critical severity advisories in production dependencies
-- Lower severity issues are visible but don't fail the build
+**Current threshold:** `--level critical`
+- Fails CI on any critical-severity advisory in production dependencies that is not in the allowlist below
+- Lower severity issues are printed but don't fail the build
 
-**Planned escalation:** After pending dependency upgrades land, tighten to `--audit-level=high`
+**Allowlist:** `security/pnpm-audit-allowlist.json` lists advisories (by GHSA id) that are known, triaged, and cannot be patched without out-of-scope work. Every entry requires a `reason` and an `added` date; the gate script prints every advisory either way (`ALLOWED` or `FAILING`), so a suppressed finding is never silently invisible. pnpm's own `pnpm.auditConfig.ignoreCves` (package.json) cannot be used for this: it only matches advisories that carry a CVE id, and at least one of the two current entries (GHSA-2xp9-vwfh-vxw4) has none.
+
+Currently allowlisted: the two critical `next@14.2.35` RCE advisories (GHSA-p293-qw3h-jr36, GHSA-2xp9-vwfh-vxw4). Neither has a 14.x patch — the fix is the Next.js 14→15 upgrade tracked in [issue #255](https://github.com/mericcintosun/alvinmunk/issues/255), which is out of scope for CI/tooling work. Removing an entry (after the linked issue lands) requires no workflow change — the gate re-fails automatically the moment an entry is deleted or a *new* GHSA id starts matching that severity.
+
+**Planned escalation:** After pending dependency upgrades land (issue #255 and others), tighten to `--level high`.
 
 ## Response Process
 
@@ -47,8 +51,8 @@ Scans production npm dependencies for known vulnerabilities.
 
 2. **Remediate:**
    - **Preferred:** Update to patched version
-   - **If no patch:** Document in `contracts/deny.toml` ignore list with reason
-   - **For npm:** Update dependencies or temporarily suppress with documented justification
+   - **If no patch (Rust):** Document in `contracts/deny.toml`'s `[advisories.ignore]` list with a reason
+   - **If no patch (npm):** Document in `security/pnpm-audit-allowlist.json` with a `reason`, an `issue` link and an `added` date — never suppress by lowering `--level` for one advisory
 
 3. **Document:** Note the decision in git commit message and any relevant tracking issues
 

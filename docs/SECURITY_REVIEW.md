@@ -82,7 +82,7 @@ cargo scout-audit            # cargo install cargo-scout-audit
 ## Automated Continuous Monitoring
 
 As of 2026-09-29, security dependency scanning runs automatically:
-- **CI Pipeline:** Every PR and push runs `cargo audit`, `cargo deny check`, and `pnpm audit --prod --audit-level=critical`
+- **CI Pipeline:** Every PR and push runs `cargo audit`, `cargo deny check`, and a gated `pnpm audit` (`scripts/pnpm-audit-gate.mjs --prod --level critical`, with known-unfixable advisories documented in `security/pnpm-audit-allowlist.json`)
 - **Weekly Schedule:** Scans run every Monday at 9:00 UTC to catch newly published advisories
 - **Policy:** See `docs/SECURITY_AUDIT_POLICY.md` for thresholds and response procedures
 
