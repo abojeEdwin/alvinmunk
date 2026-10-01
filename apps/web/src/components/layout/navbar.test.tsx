@@ -8,35 +8,48 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const { nav } = vi.hoisted(() => ({ nav: { pathname: '/' } }));
-
-vi.mock('next/navigation', () => ({ usePathname: () => nav.pathname }));
-// A plain anchor that forwards every prop, so ARIA attributes reach the DOM as they would
-// (jsdom cannot navigate, so a click only runs the link's own handler).
-vi.mock('next/link', () => ({
-  default: ({
-    href,
-    children,
-    onClick,
-    ...rest
-  }: {
-    href: string;
-    children: React.ReactNode;
-    onClick?: (e: React.MouseEvent) => void;
-  }) => (
-    <a
-      href={href}
-      {...rest}
-      onClick={(e) => {
-        e.preventDefault();
-        onClick?.(e);
-      }}
-    >
-      {children}
-    </a>
-  ),
+const { nav, wallet, readOnlyView } = vi.hoisted(() => ({
+  nav: { pathname: '/', search: '' },
+  readOnlyView: vi.fn(() => false),
+  wallet: {
+    profile: null as { handle: string; address: string; createdAt: number } | null,
+    balance: null as string | null,
+    disconnect: vi.fn(),
+  },
 }));
-vi.mock('@/components/wallet/connect-button', () => ({ ConnectButton: () => null }));
+
+vi.mock('next/navigation', () => ({
+  usePathname: () => nav.pathname,
+  useSearchParams: () => new URLSearchParams(nav.search),
+}));
+// Whether a page is a read-only ?network= view is lib/read-network's call (tested there).
+vi.mock('@/lib/read-network', () => ({ isReadOnlyView: readOnlyView }));
+// A plain anchor that forwards every prop (and its ref), so ARIA attributes reach the DOM as
+// they would (jsdom cannot navigate, so a click only runs the link's own handler).
+vi.mock('next/link', () => ({
+  default: React.forwardRef<
+    HTMLAnchorElement,
+    { href: string; children: React.ReactNode; onClick?: (e: React.MouseEvent) => void }
+  >(function Link({ href, children, onClick, ...rest }, ref) {
+    return (
+      <a
+        href={href}
+        ref={ref}
+        {...rest}
+        onClick={(e) => {
+          e.preventDefault();
+          onClick?.(e);
+        }}
+      >
+        {children}
+      </a>
+    );
+  }),
+}));
+// The real ConnectButton renders inside the mobile panel, so the tests exercise how its clicks
+// interact with the panel; only the wallet behind it is stubbed.
+vi.mock('@/components/wallet/wallet-provider', () => ({ useWallet: () => wallet }));
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }));
 
 import { Navbar } from './navbar';
 import { THEME_KEY } from '@/components/theme-toggle';
@@ -47,6 +60,10 @@ describe('Navbar', () => {
 
   beforeEach(() => {
     nav.pathname = '/';
+    nav.search = '';
+    readOnlyView.mockReset().mockReturnValue(false);
+    wallet.profile = null;
+    wallet.disconnect.mockClear();
     localStorage.clear();
     document.documentElement.className = 'dark';
     window.matchMedia = vi.fn().mockReturnValue({
@@ -69,6 +86,12 @@ describe('Navbar', () => {
   }
   const menuButton = () =>
     container.querySelector<HTMLButtonElement>('button[aria-controls="mobile-nav"]')!;
+  const panel = () => document.getElementById('mobile-nav');
+  const openPanel = async () => {
+    await act(async () => menuButton().click());
+    expect(panel()).not.toBeNull();
+    return panel()!;
+  };
   const current = (scope: ParentNode) =>
     Array.from(scope.querySelectorAll('a[aria-current]')).map((a) => [
       a.getAttribute('href'),
@@ -121,5 +144,122 @@ describe('Navbar', () => {
     expect(toggle.getAttribute('aria-label')).toBe('Switch to dark theme');
     // The theme toggle does not open the mobile menu.
     expect(menuButton().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps the panel open while a signed-in user uses the account menu', async () => {
+    wallet.profile = { handle: 'damian', address: 'G'.padEnd(56, 'A'), createdAt: 0 };
+    await mount();
+    const mobile = await openPanel();
+
+    // Tapping the account chip opens its menu instead of unmounting the whole panel.
+    await act(async () => mobile.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click());
+    expect(panel()).not.toBeNull();
+    const disconnect = Array.from(mobile.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+      (el) => el.textContent?.includes('Disconnect'),
+    );
+    expect(disconnect).toBeDefined();
+
+    await act(async () => disconnect!.click());
+    expect(wallet.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the panel when the account menu\'s View profile link is followed', async () => {
+    wallet.profile = { handle: 'damian', address: 'G'.padEnd(56, 'A'), createdAt: 0 };
+    await mount();
+    const mobile = await openPanel();
+    await act(async () => mobile.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click());
+
+    await act(async () => mobile.querySelector<HTMLAnchorElement>('a[href="/u/damian"]')!.click());
+    expect(panel()).toBeNull();
+  });
+
+  it('drops the wallet button on a read-only ?network= view, and keeps it elsewhere (#290)', async () => {
+    nav.pathname = '/u/alice';
+    nav.search = 'network=testnet';
+    readOnlyView.mockReturnValue(true);
+    await mount();
+    const mobile = await openPanel();
+    expect(readOnlyView).toHaveBeenCalledWith('/u/alice', 'testnet');
+    expect(container.querySelector('a[href="/app"]')).toBeNull();
+    expect(mobile.querySelector('a[href="/app"]')).toBeNull();
+
+    readOnlyView.mockReturnValue(false);
+    nav.search = '';
+    await mount();
+    expect(container.querySelector('a[href="/app"]')).not.toBeNull();
+  });
+
+  it('closes the panel when the signed-out "Open app" link is followed', async () => {
+    await mount();
+    const mobile = await openPanel();
+
+    await act(async () => mobile.querySelector<HTMLAnchorElement>('a[href="/app"]')!.click());
+    expect(panel()).toBeNull();
+    expect(menuButton().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes the panel when a link to the current page is tapped', async () => {
+    nav.pathname = '/stats';
+    await mount();
+    const mobile = await openPanel();
+
+    // The route does not change, so only the link's own handler can close the panel.
+    await act(async () => mobile.querySelector<HTMLAnchorElement>('a[href="/stats"]')!.click());
+    expect(panel()).toBeNull();
+  });
+
+  it('closes the panel on a route change that no link click caused (back/forward)', async () => {
+    await mount();
+    await openPanel();
+
+    nav.pathname = '/leaderboard';
+    await mount();
+    expect(panel()).toBeNull();
+    expect(menuButton().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  describe('Dashboard link for a signed-in user (#472)', () => {
+    beforeEach(() => {
+      wallet.profile = { handle: 'damian', address: 'G'.padEnd(56, 'A'), createdAt: 0 };
+    });
+    /** The nav-row Dashboard links (not the account menu's item). */
+    const dashboard = (scope: ParentNode) =>
+      Array.from(scope.querySelectorAll<HTMLAnchorElement>('a[href="/app"]')).filter(
+        (a) => a.textContent?.trim() === 'Dashboard' && !a.closest('[role="menu"]'),
+      );
+
+    it('reaches /app in one click from a public page, on desktop and in the mobile panel', async () => {
+      nav.pathname = '/leaderboard';
+      await mount();
+      expect(dashboard(container)).toHaveLength(1);
+      expect(current(container)).toEqual([['/leaderboard', 'page']]);
+
+      const mobile = await openPanel();
+      expect(dashboard(mobile)).toHaveLength(1);
+      await act(async () => dashboard(mobile)[0].click());
+      expect(panel()).toBeNull();
+    });
+
+    it.each(['/app', '/app/vouch', '/app/people'])('is the current page on %s', async (path) => {
+      nav.pathname = path;
+      await mount();
+      expect(current(container)).toEqual([['/app', 'page']]);
+      const mobile = await openPanel();
+      expect(current(mobile)).toEqual([['/app', 'page']]);
+    });
+
+    it('is not current on a route that only starts with the same letters', async () => {
+      nav.pathname = '/apple';
+      await mount();
+      expect(current(container)).toEqual([]);
+    });
+  });
+
+  it('shows no Dashboard link when signed out: the "Open app" button is the way in', async () => {
+    await mount();
+    const mobile = await openPanel();
+    const labels = Array.from(container.querySelectorAll('a')).map((a) => a.textContent?.trim());
+    expect(labels).not.toContain('Dashboard');
+    expect(mobile.querySelector('a[href="/app"]')?.textContent).toBe('Open app');
   });
 });

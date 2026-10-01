@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fetchLeaderboard } from './leaderboard';
 import { fetchReputationEvents } from './events';
 import { EVENTS } from '@alvinmunk/shared';
+import type { ReadNetwork } from './read-network';
 
 vi.mock('./events', () => ({
   fetchReputationEvents: vi.fn(),
@@ -42,6 +43,31 @@ describe('fetchLeaderboard', () => {
     ]);
   });
 
+  it('completes fetchLeaderboard even when localStorage getter or setter throws', async () => {
+    vi.mocked(fetchReputationEvents).mockResolvedValue([
+      { topics: [EVENTS.SOCIAL, 'A'], data: [0, 15], ledger: 200 },
+    ] as any);
+
+    const original = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      get() {
+        throw new DOMException('SecurityError', 'SecurityError');
+      },
+      configurable: true,
+    });
+
+    try {
+      const result = await fetchLeaderboard();
+      expect(result).toEqual([
+        { address: 'A', score: 15, rank: 1, flagged: false },
+      ]);
+    } finally {
+      if (original) {
+        Object.defineProperty(window, 'localStorage', original);
+      }
+    }
+  });
+
   // `events.ts`'s real fetchReputationEvents only rejects when the caller opts into
   // `throwOnError`; otherwise it swallows RPC failures to []. Mock it the same way here so
   // these tests exercise fetchLeaderboard's own handling of that contract, not a mock that
@@ -78,5 +104,32 @@ describe('fetchLeaderboard', () => {
     vi.mocked(fetchReputationEvents).mockResolvedValue([]);
 
     await expect(fetchLeaderboard({ throwOnError: true })).resolves.toEqual([]);
+  });
+
+  it("always scans fresh: the 5s poll must not be served the dashboard's cached window", async () => {
+    vi.mocked(fetchReputationEvents).mockResolvedValue([]);
+
+    await fetchLeaderboard({ throwOnError: true });
+
+    expect(fetchReputationEvents).toHaveBeenLastCalledWith({ throwOnError: true, maxAgeMs: 0 });
+  });
+
+  it('keeps an override network in its own snapshot, apart from the deployment\'s (#290)', async () => {
+    const net = { network: 'testnet' } as unknown as ReadNetwork;
+    localStorage.setItem('alvinmunk.leaderboard.snapshot', JSON.stringify([{ address: 'MAIN', total: 99, ledger: 1 }]));
+    vi.mocked(fetchReputationEvents).mockResolvedValue([
+      { topics: [EVENTS.SOCIAL, 'TEST'], data: 7, ledger: 5 },
+    ]);
+
+    const rows = await fetchLeaderboard({ net });
+    expect(vi.mocked(fetchReputationEvents)).toHaveBeenCalledWith({ net, maxAgeMs: 0 });
+    expect(rows.map((r) => r.address)).toEqual(['TEST']);
+    expect(JSON.parse(localStorage.getItem('alvinmunk.leaderboard.snapshot.testnet')!)).toEqual([
+      { address: 'TEST', total: 7, ledger: 5 },
+    ]);
+    // The deployment's snapshot is untouched.
+    expect(JSON.parse(localStorage.getItem('alvinmunk.leaderboard.snapshot')!)).toEqual([
+      { address: 'MAIN', total: 99, ledger: 1 },
+    ]);
   });
 });
